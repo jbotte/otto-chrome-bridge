@@ -67,14 +67,13 @@ EOF
 
 cat > "$DIR/start.sh" <<EOF
 #!/usr/bin/env bash
-# Start the bridge in the background if it is not already running.
+# Start the bridge in the background if it is not already running (detached).
 PIDFILE="$DIR/bridge.pid"
 if [ -f "\$PIDFILE" ] && kill -0 "\$(cat "\$PIDFILE")" 2>/dev/null; then
-  echo "otto-chrome-bridge already running (pid \$(cat "\$PIDFILE"))"
   exit 0
 fi
 mkdir -p "$DIR"
-nohup "$DIR/run.sh" >> "$DIR/bridge.log" 2>&1 &
+setsid nohup "$DIR/run.sh" >> "$DIR/bridge.log" 2>&1 < /dev/null &
 echo \$! > "\$PIDFILE"
 echo "otto-chrome-bridge started (pid \$(cat "\$PIDFILE"))"
 EOF
@@ -87,14 +86,23 @@ rm -rf "$DIR/bridge" "$DIR/extension" "$DIR/run.sh" "$DIR/start.sh" "$DIR/bridge
 if command -v crontab >/dev/null; then
   ( crontab -l 2>/dev/null | grep -v "otto-chrome/start.sh" ) | crontab - || true
 fi
+sed -i '/otto-chrome\/start.sh/d' "$HOME/.bashrc" 2>/dev/null || true
+sed -i '/otto-chrome\/start.sh/d' "$HOME/.profile" 2>/dev/null || true
 echo "Removed. Config kept at $DIR/config.json (delete it to forget the pairing token)."
 EOF
 chmod +x "$DIR/uninstall.sh"
 
-# Autostart via cron @reboot when available (no root needed).
+# Autostart: cron @reboot when available, and a login-shell hook as a fallback
+# (Otto devices often have neither cron nor a user systemd bus — the agent's
+# shell sessions then revive the bridge automatically after a reboot).
 if command -v crontab >/dev/null; then
   ( crontab -l 2>/dev/null | grep -v "otto-chrome/start.sh"; echo "@reboot $DIR/start.sh" ) | crontab - || true
 fi
+HOOK_LINE="[ -x '$DIR/start.sh' ] && '$DIR/start.sh' >/dev/null 2>&1"
+for rc in "$HOME/.bashrc" "$HOME/.profile"; do
+  touch "$rc" 2>/dev/null || true
+  grep -qF "otto-chrome/start.sh" "$rc" 2>/dev/null || echo "$HOOK_LINE" >> "$rc"
+done
 
 if [ "$START" = "1" ]; then
   "$DIR/start.sh"
