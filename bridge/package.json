@@ -1,0 +1,11 @@
+{
+  "name": "otto-chrome-bridge",
+  "version": "0.1.0",
+  "description": "Bridge between your Otto and the Otto Chrome Bridge browser extension. Exposes Chrome control as an MCP server.",
+  "main": "server.js",
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
