@@ -13,12 +13,12 @@ async function refresh() {
   // Focus is not a reliable indicator of unsaved edits: a user can blur a
   // field before the next periodic status refresh. Keep each edited value
   // until Save succeeds, while continuing to refresh status and pairing UI.
-  for (const id of ["bridgeUrl", "blocklist", "deviceName"]) {
+  for (const id of ["bridgeUrl", "blocklist", "deviceName", "mode", "allowEval"]) {
     const field = $(id);
-    if (!field.dataset.edited) field.value = s[id];
+    if (field.dataset.edited) continue;
+    if (id === "allowEval") field.checked = !!s.allowEval;
+    else field.value = s[id];
   }
-  $("mode").value = s.mode;
-  $("allowEval").checked = !!s.allowEval;
   if (!s.bridgeUrl) setStatus(false, "Not configured — set the Bridge URL, then Save.");
   else if (resp.connected) setStatus(true, "Connected to Otto ✓");
   else if (resp.pairingState === "pending") setStatus(false, "Pairing requested — ask Otto to approve this Chrome.");
@@ -62,7 +62,7 @@ $("save").onclick = async () => {
       allowEval: $("allowEval").checked
     }
   });
-  for (const id of ["bridgeUrl", "blocklist", "deviceName"]) $(id).dataset.edited = "";
+  for (const id of ["bridgeUrl", "blocklist", "deviceName", "mode", "allowEval"]) $(id).dataset.edited = "";
   setStatus(false, "Saved — connecting…");
   setTimeout(refresh, 1200);
 };
@@ -73,8 +73,11 @@ $("pairAgain").onclick = async () => {
   setTimeout(refresh, 1500);
 };
 
-for (const id of ["bridgeUrl", "blocklist", "deviceName"]) {
-  $(id).addEventListener("input", () => { $(id).dataset.edited = "true"; });
+for (const id of ["bridgeUrl", "blocklist", "deviceName", "mode", "allowEval"]) {
+  const field = $(id);
+  const markEdited = () => { field.dataset.edited = "true"; };
+  field.addEventListener("input", markEdited);
+  field.addEventListener("change", markEdited);
 }
 
 function copyBtn(id, field) {

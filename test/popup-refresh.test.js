@@ -14,13 +14,15 @@ class Element {
 const ids = ["status", "pending", "bridgeUrl", "blocklist", "deviceName", "mode", "allowEval", "version", "pairAgain", "save", "copyUrl"];
 const elements = Object.fromEntries(ids.map(id => [id, new Element()]));
 let polls = 0;
+let savedSettings = { bridgeUrl: "ws://saved.example/ws", blocklist: "saved.example", deviceName: "Saved Chrome", mode: "ask", allowEval: false };
 const chrome = {
   runtime: {
-    getManifest: () => ({ version: "0.3.1" }),
+    getManifest: () => ({ version: "0.3.2" }),
     sendMessage: async message => {
+      if (message.kind === "save") { savedSettings = { ...savedSettings, ...message.settings }; return { ok: true }; }
       if (message.kind !== "status") return { ok: true };
       polls++;
-      return { ok: true, settings: { bridgeUrl: "ws://saved.example/ws", blocklist: "saved.example", deviceName: "Saved Chrome", mode: "ask", allowEval: false }, connected: polls > 1, pairingState: "pending", pending: [], lastHelloOk: null };
+      return { ok: true, settings: savedSettings, connected: polls > 1, pairingState: "pending", pending: [], lastHelloOk: null };
     }
   }
 };
@@ -35,5 +37,13 @@ vm.runInNewContext(fs.readFileSync("extension/popup.js", "utf8") + "\nglobalThis
   await context.refreshForTest();
   assert.equal(elements.bridgeUrl.value, "ws://unsaved.example/ws", "refresh preserves a blurred unsaved Bridge URL");
   assert.equal(elements.status.textContent, "Connected to Otto ✓", "status still refreshes");
-  console.log("PASS: popup refresh preserves blurred unsaved values and refreshes status");
+  elements.mode.value = "auto";
+  elements.mode.listeners.change();
+  await context.refreshForTest();
+  assert.equal(elements.mode.value, "auto", "refresh preserves an unsaved Auto selection after blur");
+  await elements.save.onclick();
+  await context.refreshForTest();
+  assert.equal(savedSettings.mode, "auto", "Save persists Auto mode");
+  assert.equal(elements.mode.value, "auto", "refresh displays the saved Auto mode");
+  console.log("PASS: popup refresh preserves unsaved form values, persists Auto, and refreshes status");
 })().catch(error => { console.error(error); process.exitCode = 1; });
