@@ -4,8 +4,8 @@ from zipfile import ZipFile, ZIP_DEFLATED
 root = Path(__file__).resolve().parents[1]
 outdir = root.parent
 packages = [
-    (outdir / "otto-chrome-extension-v0.3.0.zip", [root / "extension"]),
-    (outdir / "otto-chrome-bridge-source-v0.3.0.zip", [
+    (outdir / "otto-chrome-extension-v0.3.1.zip", [root / "extension"]),
+    (outdir / "otto-chrome-bridge-source-v0.3.1.zip", [
         root / "README.md", root / "LICENSE", root / "bridge", root / "extension",
         root / "install.sh", root / "test", root / "tools"
     ])

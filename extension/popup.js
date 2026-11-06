@@ -10,9 +10,13 @@ async function refresh() {
   const resp = await chrome.runtime.sendMessage({ kind: "status" });
   if (!resp || !resp.ok) { setStatus(false, "Extension error: " + (resp && resp.error || "unknown")); return; }
   const s = resp.settings;
-  if (!$("bridgeUrl").matches(":focus")) $("bridgeUrl").value = s.bridgeUrl;
-  if (!$("blocklist").matches(":focus")) $("blocklist").value = s.blocklist;
-  if (!$("deviceName").matches(":focus")) $("deviceName").value = s.deviceName;
+  // Focus is not a reliable indicator of unsaved edits: a user can blur a
+  // field before the next periodic status refresh. Keep each edited value
+  // until Save succeeds, while continuing to refresh status and pairing UI.
+  for (const id of ["bridgeUrl", "blocklist", "deviceName"]) {
+    const field = $(id);
+    if (!field.dataset.edited) field.value = s[id];
+  }
   $("mode").value = s.mode;
   $("allowEval").checked = !!s.allowEval;
   if (!s.bridgeUrl) setStatus(false, "Not configured — set the Bridge URL, then Save.");
@@ -58,6 +62,7 @@ $("save").onclick = async () => {
       allowEval: $("allowEval").checked
     }
   });
+  for (const id of ["bridgeUrl", "blocklist", "deviceName"]) $(id).dataset.edited = "";
   setStatus(false, "Saved — connecting…");
   setTimeout(refresh, 1200);
 };
@@ -67,6 +72,10 @@ $("pairAgain").onclick = async () => {
   setStatus(false, "Pairing request sent — ask Otto to approve this Chrome.");
   setTimeout(refresh, 1500);
 };
+
+for (const id of ["bridgeUrl", "blocklist", "deviceName"]) {
+  $(id).addEventListener("input", () => { $(id).dataset.edited = "true"; });
+}
 
 function copyBtn(id, field) {
   $(id).onclick = () => {
