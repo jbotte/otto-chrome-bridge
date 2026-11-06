@@ -2,6 +2,7 @@
 # Full local smoke test: loopback MCP + two named, owner-approved browser clients.
 set -u
 cd "$(dirname "$0")/.."
+node test/popup-refresh.test.js
 PORT=${PORT:-8799}
 DIR=/tmp/oct-test
 rm -rf "$DIR"; mkdir -p "$DIR"

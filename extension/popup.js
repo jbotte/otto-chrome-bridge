@@ -10,11 +10,15 @@ async function refresh() {
   const resp = await chrome.runtime.sendMessage({ kind: "status" });
   if (!resp || !resp.ok) { setStatus(false, "Extension error: " + (resp && resp.error || "unknown")); return; }
   const s = resp.settings;
-  if (!$("bridgeUrl").matches(":focus")) $("bridgeUrl").value = s.bridgeUrl;
-  if (!$("blocklist").matches(":focus")) $("blocklist").value = s.blocklist;
-  if (!$("deviceName").matches(":focus")) $("deviceName").value = s.deviceName;
-  $("mode").value = s.mode;
-  $("allowEval").checked = !!s.allowEval;
+  // Focus is not a reliable indicator of unsaved edits: a user can blur a
+  // field before the next periodic status refresh. Keep each edited value
+  // until Save succeeds, while continuing to refresh status and pairing UI.
+  for (const id of ["bridgeUrl", "blocklist", "deviceName", "mode", "allowEval"]) {
+    const field = $(id);
+    if (field.dataset.edited) continue;
+    if (id === "allowEval") field.checked = !!s.allowEval;
+    else field.value = s[id];
+  }
   if (!s.bridgeUrl) setStatus(false, "Not configured — set the Bridge URL, then Save.");
   else if (resp.connected) setStatus(true, "Connected to Otto ✓");
   else if (resp.pairingState === "pending") setStatus(false, "Pairing requested — ask Otto to approve this Chrome.");
@@ -58,6 +62,7 @@ $("save").onclick = async () => {
       allowEval: $("allowEval").checked
     }
   });
+  for (const id of ["bridgeUrl", "blocklist", "deviceName", "mode", "allowEval"]) $(id).dataset.edited = "";
   setStatus(false, "Saved — connecting…");
   setTimeout(refresh, 1200);
 };
@@ -67,6 +72,13 @@ $("pairAgain").onclick = async () => {
   setStatus(false, "Pairing request sent — ask Otto to approve this Chrome.");
   setTimeout(refresh, 1500);
 };
+
+for (const id of ["bridgeUrl", "blocklist", "deviceName", "mode", "allowEval"]) {
+  const field = $(id);
+  const markEdited = () => { field.dataset.edited = "true"; };
+  field.addEventListener("input", markEdited);
+  field.addEventListener("change", markEdited);
+}
 
 function copyBtn(id, field) {
   $(id).onclick = () => {
