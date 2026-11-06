@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Otto Chrome Bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lets your Otto read and control this Chrome browser — with your approval on every action.",
   "permissions": ["debugger", "tabs", "scripting", "storage", "alarms", "notifications"],
   "host_permissions": ["<all_urls>"],

@@ -296,7 +296,7 @@ function handleMcp(body, res) {
             result = {
               protocolVersion: (r.params && r.params.protocolVersion) || "2025-03-26",
               capabilities: { tools: {} },
-              serverInfo: { name: "otto-chrome-bridge", version: "0.1.0" }
+              serverInfo: { name: "otto-chrome-bridge", version: "0.2.0" }
             };
             break;
           case "ping":
