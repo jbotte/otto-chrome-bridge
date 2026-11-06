@@ -51,6 +51,17 @@ In the Otto app: **Settings → Integrations → + → MCP server**, and paste t
 
 Done. Try: *“open hacker news in my Chrome and read me the top stories.”*
 
+## Several Chrome browsers or computers
+
+One bridge can accept multiple extension connections on the network — for example, `work-laptop`, `home-desktop`, and `family-PC`. Give every extension a distinct name in its popup under **This Chrome is called…**. The bridge keeps each connected browser separate.
+
+- `chrome_devices` lists connected browser names and IDs.
+- Every other `chrome_*` tool accepts an optional `device` value (name or ID), e.g. `chrome_read({"device":"work-laptop"})`.
+- If you omit `device`, Otto uses the most recently connected browser; if that one disconnects, the most recent survivor becomes the default.
+- Use unique names, especially for separate Chrome profiles on the same computer.
+
+Each extension uses the same bridge URL and pairing token for that Otto. To connect a browser from outside the home network, use a Tailscale address reachable from that computer. Don't expose the bridge to the public internet.
+
 ## Tools Otto gets
 
 | Tool | What it does | Needs approval |
@@ -65,7 +76,7 @@ Done. Try: *“open hacker news in my Chrome and read me the top stories.”*
 | `chrome_act` | click / type / key / scroll / select / wait, by element text or CSS selector, via trusted DevTools input | **yes** |
 | `chrome_eval` | run JS in the page (opt-in, off by default) | **yes, always** |
 
-`chrome_act` targets work with the **visible text** from `chrome_read` (`{"action":"click","target":"Sign in"}`) or a CSS selector. Ambiguous matches are refused with a candidate list instead of clicking something random.
+`chrome_act` targets work with the **visible text** from `chrome_read` (`{"action":"click","target":"Sign in"}`) or a CSS selector. Ambiguous matches are refused with a candidate list instead of clicking something random; choose one by passing `pick: 0` (or another listed candidate index).
 
 ## Notes & limits
 
@@ -86,6 +97,6 @@ otto-chrome/
   tools/         icon generator
 ```
 
-Test locally without Chrome: `node bridge/server.js` with `OTTO_CHROME_TOKEN=*** OTTO_CHROME_DIR=/tmp/x`, then `node test/fake-extension.js` drives a scripted extension while `test/mcp-check.sh` exercises the MCP endpoint.
+Tests: `bash test/run.sh` exercises two named fake browsers, device selection, disconnect fallback, MCP calls and denial handling. `bash test/chrome-e2e.sh` runs the real extension in headless Chrome and verifies reading, screenshot, typing, clicking and form submission.
 
 MIT licensed. Not affiliated with Google; "Otto" is your friendly agent.

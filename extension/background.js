@@ -6,6 +6,7 @@
 const DEFAULTS = {
   bridgeUrl: "",        // e.g. ws://my-otto.tailnet.ts.net:8712/ws
   token: "",            // shared secret from the bridge installer
+  deviceName: "",       // label shown to Otto when several Chromes are connected
   mode: "ask",          // ask | auto | readonly
   blocklist: "",        // newline/comma-separated domains where automation is refused
   allowEval: false      // allow the chrome_eval tool (always approval-gated)
@@ -37,9 +38,11 @@ function connect() {
     try { sock = new WebSocket(s.bridgeUrl); } catch (e) { scheduleReconnect(); return; }
     ws = sock;
     sock.onopen = () => {
+      const osName = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "Chrome";
       sock.send(JSON.stringify({
         type: "hello",
         token: s.token,
+        name: s.deviceName || osName,
         extVersion: chrome.runtime.getManifest().version,
         chromeVersion: (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1] || ""
       }));

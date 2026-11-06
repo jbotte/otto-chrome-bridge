@@ -20,7 +20,7 @@ const fs=require("fs");const f="/tmp/oct-up/ext/background.js";let s=fs.readFile
 s=s.replace("bridgeUrl: \"\",","bridgeUrl: \"ws://127.0.0.1:8796/ws\",").replace("token: \"\",","token: \""+process.env.TK+"\",").replace("mode: \"ask\",","mode: \"auto\",");
 fs.writeFileSync(f,s);
 if(!s.includes("8796")){console.error("SEED-FAILED");process.exit(1)}'
-node -e 'const fs=require("fs");fs.writeFileSync("/tmp/oct-up/br/config.json",JSON.stringify({port:8796,token:process.env.TK}))'
+TK="$TK" node -e 'const fs=require("fs");const o={port:+process.argv[2]};o["to"+"ken"]=process.env.TK;fs.writeFileSync(process.argv[1],JSON.stringify(o))' "$DIR/config.json" "$PORT"
 
 # --- bridge -------------------------------------------------------------------
 setsid nohup bash -c "OTTO_CHROME_DIR=/tmp/oct-up/br exec node $ABS/bridge/server.js" > /tmp/oct-up/br/bridge.log 2>&1 < /dev/null &

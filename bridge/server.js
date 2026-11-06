@@ -28,20 +28,46 @@ const WS_PATH = "/ws";
 const HEALTH_PATH = "/health";
 const CMD_TIMEOUT_MS = 120000;
 
-let client = null; // the one connected extension
-let clientInfo = null;
-let connectedSince = null;
+const clients = new Map(); // clientId -> { sock, info, connectedSince }
+let lastClientId = null;   // most recently connected — the default target
+let clientSeq = 0;
 let lastError = null;
 let cmdSeq = 0;
-const pending = new Map(); // id -> {resolve, reject, timer}
+const pending = new Map(); // id -> {resolve, reject, timer, clientId}
 
 function log(...a) { console.log(new Date().toISOString(), ...a); }
+
+function listDevices() {
+  return Array.from(clients.entries()).map(([id, c]) => ({
+    id,
+    name: c.info.name || "Chrome",
+    chromeVersion: c.info.chromeVersion,
+    extVersion: c.info.extVersion,
+    connectedSince: c.connectedSince,
+    isDefault: id === lastClientId
+  }));
+}
+
+function resolveDevice(device) {
+  if (!clients.size) throw new Error("No Chrome is connected. Open the Otto Chrome Bridge extension popup on your computer and check the status (Bridge URL + token from the installer output).");
+  if (device == null || device === "") {
+    if (clients.size === 1) return clients.keys().next().value;
+    if (lastClientId && clients.has(lastClientId)) return lastClientId; // most recently used wins
+  }
+  if (device == null || device === "") throw new Error("Several Chromes are connected and no default exists yet — pass device:<name> from chrome_devices.");
+  const q = String(device).toLowerCase();
+  let hits = Array.from(clients.entries()).filter(([id, c]) => id === device || (c.info.name || "").toLowerCase() === q);
+  if (!hits.length) hits = Array.from(clients.entries()).filter(([id, c]) => (c.info.name || "").toLowerCase().includes(q) || id.toLowerCase().includes(q));
+  if (!hits.length) throw new Error(`No connected Chrome matches "${device}". Connected devices: ${listDevices().map(d => `${d.name} (${d.id})`).join(", ") || "none"}`);
+  if (hits.length > 1) throw new Error(`"${device}" matches several Chromes: ${hits.map(([, c]) => c.info.name).join(", ")} — pass the exact device id from chrome_devices.`);
+  return hits[0][0];
+}
 
 // ---------------------------------------------------------------- extension side
 
 const wss = new WebSocketServer({ noServer: true });
 
-wss.on("connection", (sock) => {
+wss.on("connection", (sock, req) => {
   let hello = false;
   const guard = setTimeout(() => { if (!hello) sock.close(4001, "hello timeout"); }, 10000);
   sock.on("message", (buf) => {
@@ -56,15 +82,23 @@ wss.on("connection", (sock) => {
       }
       hello = true;
       clearTimeout(guard);
-      if (client) { try { client.close(4002, "replaced"); } catch (e) {} }
-      client = sock;
-      clientInfo = { extVersion: msg.extVersion, chromeVersion: msg.chromeVersion };
-      connectedSince = Date.now();
-      sock.send(JSON.stringify({ type: "hello-ok" }));
-      log("extension connected", JSON.stringify(clientInfo));
+      // Same device reconnecting? Replace its old socket.
+      for (const [oldId, c] of clients) {
+        if ((c.info.name || "") === (msg.name || "") && c.info.chromeVersion === msg.chromeVersion) {
+          try { c.sock.close(4002, "replaced"); } catch (e) {}
+          clients.delete(oldId);
+          for (const [pid, p] of pending) if (p.clientId === oldId) { clearTimeout(p.timer); pending.delete(pid); p.reject(new Error("Chrome extension reconnected — retry")); }
+        }
+      }
+      const id = "d" + (++clientSeq) + "-" + crypto.randomBytes(3).toString("hex");
+      clients.set(id, { sock, info: { name: msg.name || "Chrome", extVersion: msg.extVersion, chromeVersion: msg.chromeVersion }, connectedSince: Date.now() });
+      lastClientId = id;
+      sock.deviceId = id;
+      sock.send(JSON.stringify({ type: "hello-ok", deviceId: id, devices: listDevices() }));
+      log("extension connected:", msg.name || "Chrome", "— devices:", listDevices().map(d => d.name).join(", "));
       return;
     }
-    if (sock !== client) return;
+    if (sock !== (clients.get(sock.deviceId) || {}).sock) return;
     if (msg.type === "pong") return;
     if (msg.type === "result") {
       const p = pending.get(msg.id);
@@ -76,11 +110,19 @@ wss.on("connection", (sock) => {
   });
   sock.on("close", () => {
     clearTimeout(guard);
-    if (client === sock) {
-      client = null;
-      log("extension disconnected");
-      for (const [, p] of pending) { clearTimeout(p.timer); p.reject(new Error("Chrome extension disconnected mid-command")); }
-      pending.clear();
+    const id = sock.deviceId;
+    if (id && clients.has(id)) {
+      const info = (clients.get(id) || {}).info || {};
+      clients.delete(id);
+      if (lastClientId === id) {
+        let newest = null;
+        for (const [oid, c] of clients) if (!newest || c.connectedSince > newest.connectedSince) newest = { id: oid, ...c };
+        lastClientId = newest ? newest.id : null;
+      }
+      log("extension disconnected:", info.name || id, "— remaining:", listDevices().map(d => d.name).join(", ") || "none");
+      for (const [pid, p] of pending) {
+        if (p.clientId === id) { clearTimeout(p.timer); pending.delete(pid); p.reject(new Error("Chrome extension disconnected mid-command")); }
+      }
     }
   });
   sock.on("error", (e) => { lastError = String(e); });
@@ -92,31 +134,40 @@ function tokenOk(candidate) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function sendCmd(action, params) {
+function sendCmd(action, params, device) {
   return new Promise((resolve, reject) => {
-    if (!client || client.readyState !== WebSocket.OPEN) {
-      return reject(new Error("Chrome extension is not connected. Open the Otto Chrome Bridge extension popup on your computer and check the status (and that the Bridge URL/token match the installer output)."));
+    let clientId;
+    try { clientId = resolveDevice(device != null ? device : (params && params.device)); }
+    catch (e) { return reject(e); }
+    const c = clients.get(clientId);
+    if (!c || c.sock.readyState !== WebSocket.OPEN) {
+      return reject(new Error("Chrome extension is not connected. Open the Otto Chrome Bridge extension popup on your computer and check the status."));
     }
     const id = "c" + (++cmdSeq);
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error(`Command ${action} timed out after ${CMD_TIMEOUT_MS / 1000}s (a pending approval may have expired)`));
     }, CMD_TIMEOUT_MS);
-    pending.set(id, { resolve, reject, timer });
-    client.send(JSON.stringify({ type: "cmd", id, action, params }));
+    pending.set(id, { resolve, reject, timer, clientId });
+    c.sock.send(JSON.stringify({ type: "cmd", id, action, params }));
   });
 }
 
 // keepalive pings both ways are handled by the extension; server pings:
 setInterval(() => {
-  if (client && client.readyState === WebSocket.OPEN) {
-    try { client.ping(); } catch (e) {}
+  for (const c of clients.values()) {
+    if (c.sock.readyState === WebSocket.OPEN) { try { c.sock.ping(); } catch (e) {} }
   }
 }, 15000);
 
 // ---------------------------------------------------------------- MCP tools
 
 const TOOLS = [
+  {
+    name: "chrome_devices",
+    description: "List the Chromes currently connected to the bridge (name, id, versions). Other chrome_* tools accept an optional device parameter — pass the name or id here to choose which Chrome to drive. When several are connected, the most recently connected one is the default.",
+    inputSchema: { type: "object", properties: {} }
+  },
   {
     name: "chrome_status",
     description: "Check whether the user's Chrome (with the Otto Chrome Bridge extension) is connected, and its mode.",
@@ -194,24 +245,32 @@ const TOOLS = [
   }
 ];
 
+// Every tool except chrome_devices accepts an optional device selector.
+for (const t of TOOLS) {
+  if (t.name === "chrome_devices") continue;
+  t.inputSchema.properties.device = { type: "string", description: "Which Chrome to drive: device name or id from chrome_devices. Omit to use the default (most recently connected)." };
+}
+
 async function callTool(name, args) {
+  const dev = args && args.device != null ? args.device : undefined;
+  if (name === "chrome_devices") return { content: [{ type: "text", text: JSON.stringify(listDevices(), null, 2) }] };
   switch (name) {
-    case "chrome_status": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_status", {}), null, 2) }] };
-    case "chrome_tabs": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_tabs", {}), null, 2) }] };
-    case "chrome_open": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_open", args), null, 2) }] };
-    case "chrome_navigate": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_navigate", args), null, 2) }] };
-    case "chrome_close_tab": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_close_tab", args), null, 2) }] };
-    case "chrome_read": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_read", args), null, 2) }] };
+    case "chrome_status": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_status", args, dev), null, 2) }] };
+    case "chrome_tabs": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_tabs", args, dev), null, 2) }] };
+    case "chrome_open": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_open", args, dev), null, 2) }] };
+    case "chrome_navigate": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_navigate", args, dev), null, 2) }] };
+    case "chrome_close_tab": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_close_tab", args, dev), null, 2) }] };
+    case "chrome_read": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_read", args, dev), null, 2) }] };
     case "chrome_screenshot": {
-      const r = await sendCmd("chrome_screenshot", args);
+      const r = await sendCmd("chrome_screenshot", args, dev);
       const base64 = String(r.dataUrl || "").replace(/^data:image\/png;base64,/, "");
       return { content: [
         { type: "text", text: `Screenshot of ${r.url}` },
         { type: "image", data: base64, mimeType: "image/png" }
       ] };
     }
-    case "chrome_act": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_act", args), null, 2) }] };
-    case "chrome_eval": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_eval", args), null, 2) }] };
+    case "chrome_act": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_act", args, dev), null, 2) }] };
+    case "chrome_eval": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_eval", args, dev), null, 2) }] };
     default: throw new Error("Unknown tool: " + name);
   }
 }
@@ -286,9 +345,9 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({
       ok: true, service: "otto-chrome-bridge", port: PORT,
-      extensionConnected: !!(client && client.readyState === WebSocket.OPEN),
-      clientInfo, connectedSince, lastError,
-      pendingCommands: pending.size
+      extensionConnected: clients.size > 0,
+      devices: listDevices(),
+      lastError, pendingCommands: pending.size
     }));
   }
 

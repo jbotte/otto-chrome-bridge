@@ -13,6 +13,7 @@ async function refresh() {
   if (!$("bridgeUrl").matches(":focus")) $("bridgeUrl").value = s.bridgeUrl;
   if (!$("token").matches(":focus")) $("token").value = s.token;
   if (!$("blocklist").matches(":focus")) $("blocklist").value = s.blocklist;
+  if (!$("deviceName").matches(":focus")) $("deviceName").value = s.deviceName;
   $("mode").value = s.mode;
   $("allowEval").checked = !!s.allowEval;
   if (!s.bridgeUrl) setStatus(false, "Not configured — set the Bridge URL and token, then Save.");
@@ -47,6 +48,7 @@ $("save").onclick = async () => {
     settings: {
       bridgeUrl: $("bridgeUrl").value.trim(),
       token: $("token").value.trim(),
+      deviceName: $("deviceName").value.trim(),
       mode: $("mode").value,
       blocklist: $("blocklist").value,
       allowEval: $("allowEval").checked
