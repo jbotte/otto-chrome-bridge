@@ -40,17 +40,11 @@
     <div class="hint">From the bridge installer output on your Otto.</div>
   </div>
   <div class="row">
-    <label for="token">Pairing token</label>
-    <div class="inline">
-      <input type="text" id="token">
-      <button id="copyToken" title="Copy">⧉</button>
-    </div>
-  </div>
-  <div class="row">
     <label for="deviceName">This Chrome is called…</label>
     <input type="text" id="deviceName" placeholder="work laptop / home desktop / mini">
     <div class="hint">Lets you pick which browser Otto drives when several are connected.</div>
   </div>
+  <div class="hint">Save to request pairing. Then ask Otto to approve this Chrome. A private credential is issued directly to this extension; you never copy a secret.</div>
   <div class="row">
     <label for="mode">Mode</label>
     <select id="mode">
@@ -68,8 +62,8 @@
     <input type="checkbox" id="allowEval"><label for="allowEval" style="margin:0">Allow JS evaluation (advanced — always asks first)</label>
   </div>
   <div class="row inline">
-    <button class="primary" id="save">Save &amp; connect</button>
-    <button id="test">Reconnect now</button>
+    <button class="primary" id="save">Connect &amp; request pairing</button>
+    <button id="pairAgain">Reset / retry pairing</button>
   </div>
   <div class="hint" id="version"></div>
   <script src="popup.js"></script>

@@ -5,8 +5,10 @@
 
 const DEFAULTS = {
   bridgeUrl: "",        // e.g. ws://my-otto.tailnet.ts.net:8712/ws
-  token: "",            // shared secret from the bridge installer
   deviceName: "",       // label shown to Otto when several Chromes are connected
+  deviceId: "",
+  deviceCredential: "", // per-browser credential; never displayed in the popup
+  pairingState: "not_paired",
   mode: "ask",          // ask | auto | readonly
   blocklist: "",        // newline/comma-separated domains where automation is refused
   allowEval: false      // allow the chrome_eval tool (always approval-gated)
@@ -16,6 +18,7 @@ const ACTION_TOOLS = new Set(["chrome_open", "chrome_close_tab", "chrome_act", "
 
 let ws = null;
 let wsReady = false;
+let authBlocked = false;
 let reconnectDelay = 1000;
 let lastHelloOk = null;
 const pendingApprovals = new Map(); // id -> {desc, createdAt, allow, deny}
@@ -31,6 +34,7 @@ async function getSettings() {
 // ---------------------------------------------------------------- websocket
 
 function connect() {
+  if (authBlocked) return;
   getSettings().then((s) => {
     if (!s.bridgeUrl) return;
     if (ws) { try { ws.onclose = null; ws.close(); } catch (e) {} ws = null; }
@@ -41,8 +45,9 @@ function connect() {
       const osName = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "Chrome";
       sock.send(JSON.stringify({
         type: "hello",
-        token: s.token,
         name: s.deviceName || osName,
+        deviceId: s.deviceId || undefined,
+        credential: s.deviceCredential || undefined,
         extVersion: chrome.runtime.getManifest().version,
         chromeVersion: (navigator.userAgent.match(/Chrome\/([\d.]+)/) || [])[1] || ""
       }));
@@ -65,11 +70,28 @@ async function handleMsg(msg, sock) {
   const active = sock || ws;
   if (msg.type === "hello-ok") {
     wsReady = true; reconnectDelay = 1000; lastHelloOk = Date.now();
+    await chrome.storage.local.set({ pairingState: "connected" });
+    return;
+  }
+  if (msg.type === "pair-pending") {
+    wsReady = false;
+    await chrome.storage.local.set({ pairingState: "pending" });
+    return;
+  }
+  if (msg.type === "device-credential") {
+    await chrome.storage.local.set({ deviceId: msg.deviceId, deviceCredential: msg.credential, pairingState: "connected" });
+    wsReady = true;
+    return;
+  }
+  if (msg.type === "pair-expired" || msg.type === "pair-rejected") {
+    wsReady = false; authBlocked = true;
+    await chrome.storage.local.set({ pairingState: msg.type === "pair-expired" ? "expired" : "rejected" });
     return;
   }
   if (msg.type === "auth-fail") {
-    wsReady = false;
-    return; // popup shows the error; keep trying at the backoff rate
+    wsReady = false; authBlocked = true;
+    await chrome.storage.local.set({ pairingState: "revoked" });
+    return;
   }
   if (msg.type === "ping") { try { active.send(JSON.stringify({ type: "pong" })); } catch (e) {} return; }
   if (msg.type === "cmd") {
@@ -434,18 +456,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     try {
       if (msg.kind === "status") {
         const s = await getSettings();
+        const publicSettings = { ...s };
+        delete publicSettings.deviceCredential;
         sendResponse({
           ok: true, connected: wsReady, lastHelloOk,
-          settings: s,
+          settings: publicSettings,
+          pairingState: s.pairingState || "not_paired",
           pending: Array.from(pendingApprovals.entries()).map(([id, p]) => ({ id, desc: p.desc, createdAt: p.createdAt }))
         });
       } else if (msg.kind === "save") {
         const clean = {};
         for (const k of Object.keys(DEFAULTS)) if (msg.settings && k in msg.settings) clean[k] = msg.settings[k];
+        const current = await getSettings();
+        if (clean.bridgeUrl && clean.bridgeUrl !== current.bridgeUrl) {
+          clean.deviceId = ""; clean.deviceCredential = ""; clean.pairingState = "not_paired";
+        }
         await chrome.storage.local.set(clean);
-        reconnectDelay = 200; connect();
+        authBlocked = false; reconnectDelay = 200; connect();
         sendResponse({ ok: true });
       } else if (msg.kind === "connect-now") {
+        authBlocked = false; reconnectDelay = 200; connect();
+        sendResponse({ ok: true });
+      } else if (msg.kind === "reset-pairing") {
+        authBlocked = false; wsReady = false;
+        await chrome.storage.local.set({ deviceId: "", deviceCredential: "", pairingState: "not_paired" });
         reconnectDelay = 200; connect();
         sendResponse({ ok: true });
       } else if (msg.kind === "approval") {
@@ -464,6 +498,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 connect();
+// Remove the old shared browser token from pre-pairing releases.
+chrome.storage.local.remove(["token"]);
 
 // ---------------------------------------------------------------- injected functions (self-contained)
 

@@ -11,14 +11,19 @@ async function refresh() {
   if (!resp || !resp.ok) { setStatus(false, "Extension error: " + (resp && resp.error || "unknown")); return; }
   const s = resp.settings;
   if (!$("bridgeUrl").matches(":focus")) $("bridgeUrl").value = s.bridgeUrl;
-  if (!$("token").matches(":focus")) $("token").value = s.token;
   if (!$("blocklist").matches(":focus")) $("blocklist").value = s.blocklist;
   if (!$("deviceName").matches(":focus")) $("deviceName").value = s.deviceName;
   $("mode").value = s.mode;
   $("allowEval").checked = !!s.allowEval;
-  if (!s.bridgeUrl) setStatus(false, "Not configured — set the Bridge URL and token, then Save.");
-  else setStatus(resp.connected, resp.connected ? "Connected to Otto ✓" : "Disconnected — retrying…");
+  if (!s.bridgeUrl) setStatus(false, "Not configured — set the Bridge URL, then Save.");
+  else if (resp.connected) setStatus(true, "Connected to Otto ✓");
+  else if (resp.pairingState === "pending") setStatus(false, "Pairing requested — ask Otto to approve this Chrome.");
+  else if (resp.pairingState === "revoked") setStatus(false, "This Chrome was revoked — reset pairing to request access again.");
+  else if (resp.pairingState === "expired" || resp.pairingState === "rejected") setStatus(false, "Pairing did not complete — reset pairing to try again.");
+  else setStatus(false, "Not paired — save settings to request pairing.");
   $("version").textContent = "v" + chrome.runtime.getManifest().version + (resp.lastHelloOk ? " · last connected " + new Date(resp.lastHelloOk).toLocaleTimeString() : "");
+
+  $("pairAgain").hidden = !!resp.connected;
 
   const box = $("pending");
   box.innerHTML = "";
@@ -47,7 +52,6 @@ $("save").onclick = async () => {
     kind: "save",
     settings: {
       bridgeUrl: $("bridgeUrl").value.trim(),
-      token: $("token").value.trim(),
       deviceName: $("deviceName").value.trim(),
       mode: $("mode").value,
       blocklist: $("blocklist").value,
@@ -58,9 +62,9 @@ $("save").onclick = async () => {
   setTimeout(refresh, 1200);
 };
 
-$("test").onclick = async () => {
-  await chrome.runtime.sendMessage({ kind: "connect-now" });
-  setStatus(false, "Reconnecting…");
+$("pairAgain").onclick = async () => {
+  await chrome.runtime.sendMessage({ kind: "reset-pairing" });
+  setStatus(false, "Pairing request sent — ask Otto to approve this Chrome.");
   setTimeout(refresh, 1500);
 };
 
@@ -73,7 +77,6 @@ function copyBtn(id, field) {
   };
 }
 copyBtn("copyUrl", "bridgeUrl");
-copyBtn("copyToken", "token");
 
 refresh();
 setInterval(refresh, 1500);

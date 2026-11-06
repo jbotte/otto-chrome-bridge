@@ -3,8 +3,8 @@
 // Sits between your Otto agent (MCP over HTTP) and the Chrome extension
 // (WebSocket). One file, one dependency (ws), no root needed.
 //
-// Config: ~/.otto-chrome/config.json  { "port": 8712, "token": "***" }
-// Env overrides: OTTO_CHROME_PORT, OTTO_CHROME_TOKEN, OTTO_CHROME_DIR
+// Config: ~/.otto-chrome/config.json { port, devices }
+// MCP is loopback-only; Chrome clients use pending owner-approved pairing.
 
 const http = require("http");
 const fs = require("fs");
@@ -14,13 +14,21 @@ const crypto = require("crypto");
 const { WebSocketServer, WebSocket } = require("ws");
 
 const DIR = process.env.OTTO_CHROME_DIR || path.join(os.homedir(), ".otto-chrome");
+const CONFIG_PATH = path.join(DIR, "config.json");
 let cfg = {};
-try { cfg = JSON.parse(fs.readFileSync(path.join(DIR, "config.json"), "utf8")); } catch (e) {}
+try { cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")); } catch (e) {}
 const PORT = parseInt(process.env.OTTO_CHROME_PORT || cfg.port || "8712", 10);
-const TOKEN = process.env.OTTO_CHROME_TOKEN || cfg.token || "";
-if (!TOKEN) {
-  console.error("No pairing token. Run install.sh or set config.json / OTTO_CHROME_TOKEN.");
-  process.exit(1);
+cfg.devices = cfg.devices && typeof cfg.devices === "object" ? cfg.devices : {};
+
+function saveConfig() {
+  const tmp = CONFIG_PATH + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
+  fs.renameSync(tmp, CONFIG_PATH);
+}
+if (Object.prototype.hasOwnProperty.call(cfg, "token")) {
+  delete cfg.token;
+  saveConfig();
 }
 
 const MCP_PATH = "/mcp";
@@ -34,6 +42,9 @@ let clientSeq = 0;
 let lastError = null;
 let cmdSeq = 0;
 const pending = new Map(); // id -> {resolve, reject, timer, clientId}
+const pendingPairings = new Map(); // requestId -> {sock, info, requestedAt, expiresAt}
+const PAIR_REQUEST_TTL_MS = 5 * 60 * 1000;
+const MAX_PENDING_PAIRINGS = 25;
 
 function log(...a) { console.log(new Date().toISOString(), ...a); }
 
@@ -49,7 +60,7 @@ function listDevices() {
 }
 
 function resolveDevice(device) {
-  if (!clients.size) throw new Error("No Chrome is connected. Open the Otto Chrome Bridge extension popup on your computer and check the status (Bridge URL + token from the installer output).");
+  if (!clients.size) throw new Error("No Chrome is connected. Check the extension's Bridge URL and pairing status; if it is waiting, approve it with chrome_pair_requests and chrome_pair_approve.");
   if (device == null || device === "") {
     if (clients.size === 1) return clients.keys().next().value;
     if (lastClientId && clients.has(lastClientId)) return lastClientId; // most recently used wins
@@ -73,29 +84,25 @@ wss.on("connection", (sock, req) => {
   sock.on("message", (buf) => {
     let msg; try { msg = JSON.parse(buf.toString()); } catch (e) { return; }
     if (msg.type === "hello") {
-      if (!tokenOk(msg.token)) {
-        lastError = "extension presented a bad token — check the pairing token in the extension popup";
-        log("auth-fail from", req.socket.remoteAddress);
-        sock.send(JSON.stringify({ type: "auth-fail" }));
-        sock.close(4001, "bad token");
-        return;
-      }
       hello = true;
       clearTimeout(guard);
-      // Same device reconnecting? Replace its old socket.
-      for (const [oldId, c] of clients) {
-        if ((c.info.name || "") === (msg.name || "") && c.info.chromeVersion === msg.chromeVersion) {
-          try { c.sock.close(4002, "replaced"); } catch (e) {}
-          clients.delete(oldId);
-          for (const [pid, p] of pending) if (p.clientId === oldId) { clearTimeout(p.timer); pending.delete(pid); p.reject(new Error("Chrome extension reconnected — retry")); }
-        }
+      const info = { name: String(msg.name || "Chrome").slice(0, 80), extVersion: msg.extVersion || "", chromeVersion: msg.chromeVersion || "" };
+      if (msg.deviceId && msg.credential && authenticateDevice(msg.deviceId, msg.credential)) {
+        registerClient(sock, String(msg.deviceId), info);
+        return;
       }
-      const id = "d" + (++clientSeq) + "-" + crypto.randomBytes(3).toString("hex");
-      clients.set(id, { sock, info: { name: msg.name || "Chrome", extVersion: msg.extVersion, chromeVersion: msg.chromeVersion }, connectedSince: Date.now() });
-      lastClientId = id;
-      sock.deviceId = id;
-      sock.send(JSON.stringify({ type: "hello-ok", deviceId: id, devices: listDevices() }));
-      log("extension connected:", msg.name || "Chrome", "— devices:", listDevices().map(d => d.name).join(", "));
+      // New browsers are quarantined until the owner approves through the local MCP tools.
+      expirePairings();
+      if (pendingPairings.size >= MAX_PENDING_PAIRINGS) {
+        sock.send(JSON.stringify({ type: "auth-fail", reason: "pairing queue full" }));
+        return sock.close(4005, "pairing queue full");
+      }
+      const requestId = crypto.randomBytes(8).toString("hex");
+      const requestedAt = Date.now();
+      pendingPairings.set(requestId, { sock, info, requestedAt, expiresAt: requestedAt + PAIR_REQUEST_TTL_MS, remoteAddress: req.socket.remoteAddress });
+      sock.pendingPairId = requestId;
+      sock.send(JSON.stringify({ type: "pair-pending", requestId, expiresAt: requestedAt + PAIR_REQUEST_TTL_MS }));
+      log("pairing request:", info.name, "expires in five minutes");
       return;
     }
     if (sock !== (clients.get(sock.deviceId) || {}).sock) return;
@@ -110,6 +117,7 @@ wss.on("connection", (sock, req) => {
   });
   sock.on("close", () => {
     clearTimeout(guard);
+    if (sock.pendingPairId) pendingPairings.delete(sock.pendingPairId);
     const id = sock.deviceId;
     if (id && clients.has(id)) {
       const info = (clients.get(id) || {}).info || {};
@@ -128,10 +136,87 @@ wss.on("connection", (sock, req) => {
   sock.on("error", (e) => { lastError = String(e); });
 });
 
-function tokenOk(candidate) {
-  const a = Buffer.from(String(candidate || ""));
-  const b = Buffer.from(TOKEN);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+function hashCredential(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex");
+}
+
+function timingSafeHexEqual(a, b) {
+  if (!/^[0-9a-f]{64}$/i.test(String(a || "")) || !/^[0-9a-f]{64}$/i.test(String(b || ""))) return false;
+  return crypto.timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex"));
+}
+
+function authenticateDevice(deviceId, credential) {
+  const stored = cfg.devices[deviceId];
+  if (!stored || !stored.credentialHash) return false;
+  return timingSafeHexEqual(stored.credentialHash, hashCredential(credential));
+}
+
+function registerClient(sock, id, incomingInfo) {
+  const stored = cfg.devices[id];
+  if (!stored) return sock.close(4001, "device revoked");
+  const info = {
+    name: String(incomingInfo.name || stored.name || "Chrome").slice(0, 80),
+    extVersion: incomingInfo.extVersion || "",
+    chromeVersion: incomingInfo.chromeVersion || ""
+  };
+  const previous = clients.get(id);
+  if (previous && previous.sock !== sock) {
+    try { previous.sock.close(4002, "replaced"); } catch (e) {}
+    for (const [pid, p] of pending) if (p.clientId === id) { clearTimeout(p.timer); pending.delete(pid); p.reject(new Error("Chrome extension reconnected — retry")); }
+  }
+  stored.name = info.name;
+  saveConfig();
+  clients.set(id, { sock, info, connectedSince: Date.now() });
+  lastClientId = id;
+  sock.deviceId = id;
+  sock.send(JSON.stringify({ type: "hello-ok", deviceId: id }));
+  log("extension connected:", info.name, "— devices:", listDevices().map(d => d.name).join(", "));
+}
+
+function expirePairings() {
+  const now = Date.now();
+  for (const [id, p] of pendingPairings) {
+    if (p.expiresAt <= now) {
+      pendingPairings.delete(id);
+      try { p.sock.send(JSON.stringify({ type: "pair-expired" })); p.sock.close(4003, "pair request expired"); } catch (e) {}
+    }
+  }
+}
+setInterval(expirePairings, 15000);
+
+function approvePairing(requestId) {
+  expirePairings();
+  const p = pendingPairings.get(String(requestId));
+  if (!p) throw new Error("No pending pairing with that requestId (it may have expired or disconnected).");
+  const id = "d" + (++clientSeq) + "-" + crypto.randomBytes(3).toString("hex");
+  const credential = crypto.randomBytes(32).toString("base64url");
+  cfg.devices[id] = { name: p.info.name, credentialHash: hashCredential(credential), createdAt: Date.now() };
+  saveConfig();
+  pendingPairings.delete(String(requestId));
+  registerClient(p.sock, id, p.info);
+  // Deliver the new browser-only credential once over its established WebSocket.
+  p.sock.send(JSON.stringify({ type: "device-credential", deviceId: id, credential }));
+  return { deviceId: id, name: p.info.name };
+}
+
+function rejectPairing(requestId) {
+  const p = pendingPairings.get(String(requestId));
+  if (!p) throw new Error("No pending pairing with that requestId.");
+  pendingPairings.delete(String(requestId));
+  try { p.sock.send(JSON.stringify({ type: "pair-rejected" })); p.sock.close(4004, "pairing rejected"); } catch (e) {}
+  return { rejected: true, name: p.info.name };
+}
+
+function revokeDevice(deviceId) {
+  const stored = cfg.devices[String(deviceId)];
+  if (!stored) throw new Error("Unknown device id.");
+  delete cfg.devices[String(deviceId)];
+  saveConfig();
+  const c = clients.get(String(deviceId));
+  if (c) { clients.delete(String(deviceId)); try { c.sock.send(JSON.stringify({ type: "auth-fail", reason: "revoked" })); c.sock.close(4001, "device revoked"); } catch (e) {} }
+  if (lastClientId === String(deviceId)) lastClientId = clients.size ? Array.from(clients.keys()).at(-1) : null;
+  for (const [pid, p] of pending) if (p.clientId === String(deviceId)) { clearTimeout(p.timer); pending.delete(pid); p.reject(new Error("Device revoked")); }
+  return { revoked: true, name: stored.name || deviceId };
 }
 
 function sendCmd(action, params, device) {
@@ -163,6 +248,26 @@ setInterval(() => {
 // ---------------------------------------------------------------- MCP tools
 
 const TOOLS = [
+  {
+    name: "chrome_pair_requests",
+    description: "List new Chrome browsers waiting to pair. Only show/approve requests when the owner asked to connect that browser.",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "chrome_pair_approve",
+    description: "Approve a pending Chrome pairing after the owner explicitly requests it. The bridge creates a private per-browser credential; no credential is returned to the caller.",
+    inputSchema: { type: "object", properties: { requestId: { type: "string" } }, required: ["requestId"] }
+  },
+  {
+    name: "chrome_pair_reject",
+    description: "Reject a pending Chrome pairing request.",
+    inputSchema: { type: "object", properties: { requestId: { type: "string" } }, required: ["requestId"] }
+  },
+  {
+    name: "chrome_device_revoke",
+    description: "Revoke a previously paired Chrome browser so its stored credential can no longer reconnect.",
+    inputSchema: { type: "object", properties: { deviceId: { type: "string" } }, required: ["deviceId"] }
+  },
   {
     name: "chrome_devices",
     description: "List the Chromes currently connected to the bridge (name, id, versions). Other chrome_* tools accept an optional device parameter — pass the name or id here to choose which Chrome to drive. When several are connected, the most recently connected one is the default.",
@@ -247,12 +352,20 @@ const TOOLS = [
 
 // Every tool except chrome_devices accepts an optional device selector.
 for (const t of TOOLS) {
-  if (t.name === "chrome_devices") continue;
+  if (t.name.startsWith("chrome_pair_") || t.name === "chrome_device_revoke" || t.name === "chrome_devices") continue;
   t.inputSchema.properties.device = { type: "string", description: "Which Chrome to drive: device name or id from chrome_devices. Omit to use the default (most recently connected)." };
 }
 
 async function callTool(name, args) {
   const dev = args && args.device != null ? args.device : undefined;
+  if (name === "chrome_pair_requests") {
+    expirePairings();
+    const rows = Array.from(pendingPairings.entries()).map(([id, p]) => ({ requestId: id, name: p.info.name, chromeVersion: p.info.chromeVersion, requestedAt: p.requestedAt, expiresAt: p.expiresAt }));
+    return { content: [{ type: "text", text: JSON.stringify(rows, null, 2) }] };
+  }
+  if (name === "chrome_pair_approve") return { content: [{ type: "text", text: JSON.stringify(approvePairing(args.requestId), null, 2) }] };
+  if (name === "chrome_pair_reject") return { content: [{ type: "text", text: JSON.stringify(rejectPairing(args.requestId), null, 2) }] };
+  if (name === "chrome_device_revoke") return { content: [{ type: "text", text: JSON.stringify(revokeDevice(args.deviceId), null, 2) }] };
   if (name === "chrome_devices") return { content: [{ type: "text", text: JSON.stringify(listDevices(), null, 2) }] };
   switch (name) {
     case "chrome_status": return { content: [{ type: "text", text: JSON.stringify(await sendCmd("chrome_status", args, dev), null, 2) }] };
@@ -296,7 +409,7 @@ function handleMcp(body, res) {
             result = {
               protocolVersion: (r.params && r.params.protocolVersion) || "2025-03-26",
               capabilities: { tools: {} },
-              serverInfo: { name: "otto-chrome-bridge", version: "0.2.0" }
+              serverInfo: { name: "otto-chrome-bridge", version: "0.3.0" }
             };
             break;
           case "ping":
@@ -338,7 +451,7 @@ function handleMcp(body, res) {
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, "http://localhost");
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Bridge-Token");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }
 
   if (u.pathname === HEALTH_PATH) {
@@ -347,14 +460,17 @@ const server = http.createServer((req, res) => {
       ok: true, service: "otto-chrome-bridge", port: PORT,
       extensionConnected: clients.size > 0,
       devices: listDevices(),
+      pendingPairings: pendingPairings.size,
       lastError, pendingCommands: pending.size
     }));
   }
 
   if (u.pathname === MCP_PATH && req.method === "POST") {
-    if (!tokenOk(u.searchParams.get("t") || req.headers["x-bridge-token"] || "")) {
-      res.writeHead(401, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "bad token" }, id: null }));
+    const remote = req.socket.remoteAddress || "";
+    const isLoopback = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
+    if (!isLoopback) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "MCP is loopback-only; connect from the Otto itself." }, id: null }));
     }
     let body = "";
     req.on("data", (c) => { body += c; if (body.length > 4e6) req.destroy(); });

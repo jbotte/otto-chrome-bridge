@@ -3,20 +3,18 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/jbotte/otto-chrome-bridge/main/install.sh | bash
 #
-# Options: --port N --token XXX --repo URL --no-start
+# Options: --port N --repo URL --no-start
 set -euo pipefail
 
 REPO="${REPO:-https://github.com/jbotte/otto-chrome-bridge.git}"
 DIR="${OTTO_CHROME_DIR:-$HOME/.otto-chrome}"
 PORT="${OTTO_CHROME_PORT:-8712}"
-TOKEN="${OTTO_CHROME_TOKEN:-}"
 START=1
 SRC=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --port) PORT="$2"; shift 2;;
-    --token) TOKEN="$2"; shift 2;;
     --repo) REPO="$2"; shift 2;;
     --no-start) START=0; shift;;
     *) echo "unknown option: $1" >&2; exit 1;;
@@ -48,14 +46,8 @@ rm -rf "$DIR/bridge" "$DIR/extension"
 cp -r "$SRC/bridge" "$DIR/bridge"
 cp -r "$SRC/extension" "$DIR/extension"
 
-# Pairing token: keep an existing one unless overridden.
-if [ -z "$TOKEN" ] && [ -f "$DIR/config.json" ]; then
-  TOKEN="$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).token||"")}catch(e){}' "$DIR/config.json")"
-fi
-if [ -z "$TOKEN" ]; then
-  TOKEN="$(node -e 'console.log(require("crypto").randomBytes(8).toString("hex"))')"
-fi
-node -e 'const fs=require("fs");fs.writeFileSync(process.argv[1],JSON.stringify({port:+process.argv[2],token:process.argv[3]},null,2));fs.chmodSync(process.argv[1],0o600)' "$DIR/config.json" "$PORT" "$TOKEN"
+# Preserve paired-device hashes on upgrade, but keep no master/browser token.
+node -e 'const fs=require("fs");const p=process.argv[1];let c={};try{c=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){};c={port:+process.argv[2],devices:(c.devices&&typeof c.devices==="object")?c.devices:{}};fs.writeFileSync(p,JSON.stringify(c,null,2));fs.chmodSync(p,0o600)' "$DIR/config.json" "$PORT"
 
 # Dependencies (only needed when running the bridge; harmless offline if cached)
 ( cd "$DIR/bridge" && { npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1 || npm install --omit=dev --no-audit --no-fund; } )
@@ -83,12 +75,13 @@ cat > "$DIR/uninstall.sh" <<EOF
 #!/usr/bin/env bash
 [ -f "$DIR/bridge.pid" ] && kill "\$(cat "$DIR/bridge.pid")" 2>/dev/null
 rm -rf "$DIR/bridge" "$DIR/extension" "$DIR/run.sh" "$DIR/start.sh" "$DIR/bridge.log" "$DIR/bridge.pid"
+rm -f "$DIR/config.json" "$DIR/config.json.tmp"
 if command -v crontab >/dev/null; then
   ( crontab -l 2>/dev/null | grep -v "otto-chrome/start.sh" ) | crontab - || true
 fi
 sed -i '/otto-chrome\/start.sh/d' "$HOME/.bashrc" 2>/dev/null || true
 sed -i '/otto-chrome\/start.sh/d' "$HOME/.profile" 2>/dev/null || true
-echo "Removed. Config kept at $DIR/config.json (delete it to forget the pairing token)."
+echo "Removed bridge and paired-device credentials."
 EOF
 chmod +x "$DIR/uninstall.sh"
 
@@ -135,16 +128,16 @@ cat <<EOF
    Unzip it, then open chrome://extensions → enable "Developer mode"
    → "Load unpacked" → pick the folder named  extension  (inside otto-chrome-bridge-main).
 
- ── Step 2 · Point the extension at this Otto ──
-   Click the Otto Chrome Bridge puzzle-piece icon and fill in:
-     Bridge URL:   $BRIDGE_URLS   ← pick one reachable from this computer
-     Token:        $TOKEN
-   Mode "Ask me before Otto acts" is recommended. Press Save & connect.
+ ── Step 2 · Request browser pairing ──
+   Click the extension icon, enter a Bridge URL reachable from this computer:
+     $BRIDGE_URLS
+   Choose a Chrome name and press "Connect & request pairing".
+   No shared secret is copied. The extension waits for owner approval.
 
  ── Step 3 · Connect your Otto ──
    In the Otto app: Settings → Integrations → + → MCP server, URL:
-     http://127.0.0.1:$PORT/mcp?t=$TOKEN
-   (From another machine use this box's address instead of 127.0.0.1.)
+     http://127.0.0.1:$PORT/mcp
+   Then ask your Otto to "approve the pending Chrome pairing".
 
  Then tell your Otto: "open example.com in my Chrome and read it back to me".
 ============================================================

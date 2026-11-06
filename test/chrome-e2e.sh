@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # End-to-end: real headless Chrome + the real extension + bridge + MCP.
 # Requires Google Chrome or Chromium (Chrome 116+).
-# Generates a random pairing token at runtime; nothing secret is stored in the repo.
 set -u
 cd "$(dirname "$0")/.."
 PORT=${PORT:-8798}
 DIR=/tmp/oct-e2e
 PROFILE=/tmp/oct-e2e-profile
 rm -rf "$DIR" "$PROFILE"; mkdir -p "$DIR"
-TK="$(node -e 'console.log(require("crypto").randomBytes(8).toString("hex"))')"
 
 cleanup() {
   [ -n "${CH:-}" ] && kill "$CH" 2>/dev/null
@@ -21,11 +19,10 @@ trap cleanup EXIT
 # Test copy of the extension with settings seeded into DEFAULTS (never ship this).
 cp -r extension "$DIR/extension"
 sed -i "s#bridgeUrl: \"\",#bridgeUrl: \"ws://127.0.0.1:$PORT/ws\",#" "$DIR/extension/background.js"
-sed -i "s#token: \"\",#token: \"$TK\",#" "$DIR/extension/background.js"
 sed -i "s#mode: \"ask\",#mode: \"auto\",#" "$DIR/extension/background.js"
 grep -q "ws://127.0.0.1:$PORT/ws" "$DIR/extension/background.js" || { echo "SEED-FAILED"; exit 1; }
 
-TK="$TK" node -e 'const fs=require("fs");fs.writeFileSync(process.argv[1],JSON.stringify({port:+process.argv[2],token:process.env.TK}))' "$DIR/config.json" "$PORT"
+node -e 'const fs=require("fs");fs.writeFileSync(process.argv[1],JSON.stringify({port:+process.argv[2],devices:{}},null,2))' "$DIR/config.json" "$PORT"
 OTTO_CHROME_DIR=$DIR node bridge/server.js > "$DIR/bridge.log" 2>&1 &
 BRIDGE=$!
 sleep 1
@@ -40,18 +37,24 @@ CH=$!
 sleep 4
 NODE_PATH=$PWD/bridge/node_modules node test/cdp-load.js 9235 "$DIR/extension"
 
-echo -n "waiting for extension..."
-CONN=no
+echo -n "waiting for pairing request..."
+PENDING=no
 for i in $(seq 1 30); do
-  curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"extensionConnected":true' && { CONN=yes; break; }
+  curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -Eq '"pendingPairings":[1-9]' && { PENDING=yes; break; }
   sleep 1
 done
-echo " connected=$CONN"
+echo " pending=$PENDING"
 curl -fsS "http://127.0.0.1:$PORT/health"; echo
-[ "$CONN" = yes ] || { echo "--- chrome.log tail:"; tail -5 "$DIR/chrome.log"; echo "--- bridge.log:"; cat "$DIR/bridge.log"; exit 1; }
+[ "$PENDING" = yes ] || { echo "--- chrome.log tail:"; tail -5 "$DIR/chrome.log"; echo "--- bridge.log:"; cat "$DIR/bridge.log"; exit 1; }
 
-mcp() { curl -fsS -X POST "http://127.0.0.1:$PORT/mcp?t=$TK" -H 'Content-Type: application/json' -d "$1"; echo; }
-mcp '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' > /dev/null
+call_mcp() { curl -fsS -X POST "http://127.0.0.1:$PORT/mcp" -H 'Content-Type: application/json' -d "$1"; }
+mcp() { call_mcp "$1"; echo; }
+call_mcp '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' > /dev/null
+REQS="$(call_mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"chrome_pair_requests","arguments":{}}}')"
+REQ_ID="$(printf '%s' "$REQS" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const r=JSON.parse(d);const a=JSON.parse(r.result.content[0].text);if(a[0])process.stdout.write(a[0].requestId)})')"
+[ -n "$REQ_ID" ] || { echo "No pairing request found"; exit 1; }
+mcp "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"chrome_pair_approve\",\"arguments\":{\"requestId\":\"$REQ_ID\"}}}" > /dev/null
+for i in $(seq 1 20); do curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"extensionConnected":true' && break; sleep 0.3; done
 
 echo "== chrome_status"
 mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"chrome_status","arguments":{}}}' | cut -c1-400
